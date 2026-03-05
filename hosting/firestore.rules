@@ -1,0 +1,153 @@
+// Firestore Security Rules for VaidyaChain
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Users collection rules
+    match /users/{userId} {
+      // Allow users to read their own profile
+      allow get: if request.auth != null && request.auth.uid == userId;
+      
+      // Allow users to create their own profile (during registration)
+      allow create: if request.auth != null && request.auth.uid == userId;
+      
+      // Allow users to update their own profile
+      allow update: if request.auth != null && request.auth.uid == userId &&
+                    // Only allow specific fields to be updated
+                    request.resource.data.keys().hasOnly([
+                      'profile', 'preferences', 'updatedAt'
+                    ]) &&
+                    // Validate profile data
+                    validateProfileData(request.resource.data.profile) &&
+                    // Prevent role changes
+                    (!request.resource.data.keys().hasAny(['role', 'userId', 'email']));
+      
+      // Deny delete operations on user profiles
+      allow delete: if false;
+    }
+    
+    // Transactions collection rules
+    match /transactions/{transactionId} {
+      // Allow authenticated users to read transactions they're involved in
+      allow get: if request.auth != null;
+      
+      // Allow users to create transactions (with validation)
+      allow create: if request.auth != null &&
+                    validateTransactionData(request.resource.data) &&
+                    // Only allow users to create transactions for their role
+                    hasValidUserRole(request.auth.uid, request.resource.data.type);
+      
+      // Deny updates and deletes (blockchain immutability)
+      allow update, delete: if false;
+    }
+    
+    // Smart contracts collection rules
+    match /smart_contracts/{contractId} {
+      // Allow read access to all authenticated users
+      allow get: if request.auth != null;
+      
+      // Only allow system updates (via Cloud Functions)
+      allow create, update: if false;
+      
+      // Deny delete operations
+      allow delete: if false;
+    }
+    
+    // Notifications collection rules
+    match /notifications/{notificationId} {
+      // Allow users to read their own notifications
+      allow get: if request.auth != null && 
+                 request.auth.uid == resource.data.userId;
+      
+      // Allow users to create notifications for themselves
+      allow create: if request.auth != null &&
+                    request.resource.data.userId == request.auth.uid;
+      
+      // Allow users to update their own notifications (mark as read)
+      allow update: if request.auth != null &&
+                    request.auth.uid == resource.data.userId &&
+                    request.resource.data.keys().hasOnly(['read', 'updatedAt']);
+      
+      // Allow users to delete their own notifications
+      allow delete: if request.auth != null &&
+                    request.auth.uid == resource.data.userId;
+    }
+    
+    // Analytics collection rules
+    match /analytics/{metricId} {
+      // Read access for authenticated users
+      allow get: if request.auth != null;
+      
+      // Only allow system updates (via Cloud Functions)
+      allow create, update: if false;
+      
+      // Deny delete operations
+      allow delete: if false;
+    }
+    
+    // Batches collection rules
+    match /batches/{batchId} {
+      // Allow read access to authenticated users
+      allow get: if request.auth != null;
+      
+      // Allow creation by farmers or manufacturers
+      allow create: if request.auth != null &&
+                    (getUserRole(request.auth.uid) == 'farmer' || 
+                     getUserRole(request.auth.uid) == 'manufacturer') &&
+                    validateBatchData(request.resource.data);
+      
+      // Allow updates by the owner
+      allow update: if request.auth != null &&
+                    resource.data.ownerId == request.auth.uid &&
+                    request.resource.data.keys().hasOnly([
+                      'status', 'location', 'updatedAt'
+                    ]);
+      
+      // Deny delete operations
+      allow delete: if false;
+    }
+  }
+  
+  // Helper functions
+  function validateProfileData(profile) {
+    return profile.name is string &&
+           profile.name.size() > 0 &&
+           profile.contact is string &&
+           profile.contact.size() == 10 &&
+           profile.location is string &&
+           profile.location.size() > 0;
+  }
+  
+  function validateTransactionData(transaction) {
+    return transaction.type is string &&
+           transaction.data is map &&
+           transaction.batchId is string &&
+           transaction.userId is string &&
+           ['collection', 'lab-test', 'manufacturing', 'order', 'insurance'].hasAny([transaction.type]);
+  }
+  
+  function validateBatchData(batch) {
+    return batch.batchId is string &&
+           batch.farmerId is string &&
+           batch.herbType is string &&
+           batch.quantity is int &&
+           batch.quantity > 0;
+  }
+  
+  function hasValidUserRole(userId, transactionType) {
+    // Get user role
+    return exists(/databases/$(database)/documents/users/$(userId)) &&
+           get(/databases/$(database)/documents/users/$(userId)).data.role in [
+             'farmer', 'lab', 'manufacturer', 'consumer'
+           ];
+  }
+  
+  function getUserRole(userId) {
+    return get(/databases/$(database)/documents/users/$(userId)).data.role;
+  }
+  
+  function isOwner(userId, resourcePath) {
+    return get(resourcePath).data.userId == userId;
+  }
+}
